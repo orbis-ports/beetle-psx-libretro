@@ -321,6 +321,14 @@ void *orbis_lr_map_code(void *addr, size_t size)
          orbis_lr_unmap(at, len);
          return NULL;
       }
+
+      /* ⚠ THE ANSWERING HALF, AND IT IS AT ERROR LEVEL ON PURPOSE. The warning above is the
+       * only lightrec line that reaches klog, because this frontend puts everything below
+       * RARCH_ERR on UDP alone. A reader watching klog would see "calling %p" and then nothing,
+       * which is exactly what the death it warns about looks like. A pair that only ever prints
+       * its first half is worse than no instrumentation. */
+      log_cb(RETRO_LOG_ERROR, "[PS4] lightrec: %p returned 0x00c0ffee - the code buffer executes, "
+                              "and the line above is answered rather than final.\n", at);
    }
 
    orbis_lr_code_state = 1;
