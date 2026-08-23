@@ -318,6 +318,45 @@ else ifeq ($(platform), vita)
    FLAGS  += -DVITA
    STATIC_LINKING = 1
 
+# PlayStation 4 (OpenOrbis + orbis-compat). Produces objects; the caller archives them and
+# turns the archive into a .prx, because a libretro module here is create-fself --lib rather
+# than a shared object -- this console has neither.
+#
+# STATIC_LINKING stays 0 on purpose: a module has its own symbol table and cannot see the
+# frontend's libretro-common, so it must carry its own copy. The .a arm above (vita) is the
+# other choice and is what a core linked INTO the eboot would want.
+else ifeq ($(platform), orbis)
+   TARGET  := $(TARGET_NAME)_libretro_orbis.a
+   CC       = clang
+   CXX      = clang++
+   AR       = llvm-ar
+   OO_PS4_TOOLCHAIN ?= $(HOME)/.local/opt/openorbis
+   ORBIS_COMPAT_DIR ?= $(HOME)/src-ps4/orbis-compat
+   # ⚠ NO -I FOR MESA'S HEADERS HERE, DELIBERATELY. The frontend's loader shim needs the
+   # exact vulkan_core.h RADV was built against, because it forwards through the ICD's own
+   # entry point and a struct-layout mismatch there compiles cleanly and fails at run time.
+   # A CORE is a different case: it is an ordinary Vulkan client, and Vulkan's ABI is
+   # backward compatible, so the headers it was written against are the right ones. Forcing
+   # Mesa's current ones broke it on VK_IMAGE_TYPE_RANGE_SIZE, an enum removed from the
+   # spec years after this core started using it.
+   ORBIS_BASE := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
+                 -isysroot $(OO_PS4_TOOLCHAIN) \
+                 -isystem $(ORBIS_COMPAT_DIR)/include \
+                 -isystem $(OO_PS4_TOOLCHAIN)/include \
+                 -DORBIS -D__ORBIS__ -D__PS4__ -DPS4 -D_BSD_SOURCE=1
+   CFLAGS   += $(ORBIS_BASE)
+   CXXFLAGS += $(ORBIS_BASE) -isystem $(OO_PS4_TOOLCHAIN)/include/c++/v1
+   HAVE_VULKAN    = 1
+   HAVE_OPENGL    = 0
+   STATIC_LINKING = 0
+   # ⚠ THE DYNAREC IS OFF, AND NOT BY PREFERENCE. Lightrec mirrors PSX RAM by mapping the
+   # same pages at several addresses, which it does through memfd_create/MAP_SHM -- neither
+   # of which exists here. libretro.c:2345-2574 is where it shows. The interpreter is
+   # slower and it runs; a mirrored-mapping story for this platform is its own piece of
+   # work, and this build is asking whether the GPU path functions at all.
+   HAVE_LIGHTREC  = 0
+   NEED_CXX_LINKER = 1
+
 # Xbox 360
 else ifeq ($(platform), xenon)
    TARGET := $(TARGET_NAME)_libretro_xenon360.a
