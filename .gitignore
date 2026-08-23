@@ -35,3 +35,8 @@ tools/vkhost/vkhost
 # Python bytecode from the VCD authoring script (tools/vcd)
 __pycache__/
 *.pyc
+
+# PlayStation 4 build products
+/mednafen_psx_hw_libretro.prx
+/mednafen_psx_hw_libretro.info
+/.ps4-lightrec

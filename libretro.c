@@ -2237,6 +2237,9 @@ static void SetDiscWrapper(const bool CD_TrayOpen) {
 #define PIO_SIZE     (65536)
 
 #ifdef HAVE_LIGHTREC
+#ifdef __ORBIS__
+#include "ps4/orbis_lightrec_mem.h"
+#endif
 /* MAP_FIXED_NOREPLACE allows base 0 to work if "sysctl vm.mmap_min_addr = 0"
  was used. Base 0 will perform better by directly mapping emulated addresses
  to host addresses. If MAP_FIXED_NOREPLACE is not available we should not use
@@ -2337,6 +2340,34 @@ static void * mmap_huge(void *addr, size_t length, int prot, int flags,
 #define MFAILED MAP_FAILED
 #define NUM_MEM 4
 #define MEMFDTYPE int
+#elif defined(__ORBIS__)
+/* PlayStation 4. There is no POSIX shared memory on this console - no shm_open, no
+ * memfd_create, no /dev/ashmem - and for a long time this file's own comment recorded that as
+ * the reason the dynamic recompiler could not be built here.
+ *
+ * ⚠ THAT WAS TRUE OF POSIX AND SAID NOTHING ABOUT THE PLATFORM. Sony's own allocator hands
+ * out PHYSICAL pages and maps them separately, which is the same separation memfd_create and
+ * mmap(MAP_SHARED) provide and rather more directly. Mapping one physical range at several
+ * addresses at once - the single thing Lightrec needs and the thing shm was standing in for -
+ * was measured on this console on 2026-08-23: eight simultaneous views, coherent in both
+ * directions, and dropping one leaves the rest intact.
+ *
+ * The `memfd` this arm threads through the calls below is therefore not a descriptor. It is
+ * the direct-memory offset of the physical allocation, and it is an off_t rather than an int
+ * because it is a byte offset into the console's physical memory.
+ *
+ * ⚠ AND MAP_FIXED HERE HAS NO `_NOREPLACE` FORM. Every mapping below asks whether the address
+ * is empty before it takes it; see orbis_lr_range_free. The Linux arm's habit of requesting an
+ * address and checking what came back is not a safety net on this kernel - the frontend's heap
+ * would already be gone by the time the check ran.
+ */
+#define MAP(addr, size, fd, offset)      orbis_lr_map_private(addr, size)
+#define MAP_SHM(addr, size, fd, offset)  orbis_lr_map_shared(addr, size, fd, offset)
+#define MAP_CODE(addr, size, fd, offset) orbis_lr_map_code(addr, size)
+#define UNMAP(addr, size)                orbis_lr_unmap(addr, size)
+#define MFAILED NULL
+#define NUM_MEM 4
+#define MEMFDTYPE off_t
 #else
 #define MAP(addr, size, fd, offset) \
 	mmap(addr,size, PROT_READ | PROT_WRITE, \
@@ -2555,6 +2586,15 @@ int lightrec_init_mmap(void)
 		goto close_return;
 	}
 #endif
+#ifdef __ORBIS__
+	/* The physical pages that stand in for the memfd. There is no descriptor and nothing to
+	 * ftruncate: sceKernelAllocateDirectMemory takes the size up front and hands back an
+	 * offset into the console's physical memory, which is what every MAP_SHM below maps. */
+	const off_t memfd = orbis_lr_backing_create(RAM_SIZE);
+
+	if (memfd < 0)
+		return 0;
+#endif
 #ifdef HAVE_WIN_SHM
 	HANDLE memfd = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_EXECUTE_READWRITE, 0, RAM_SIZE+LIGHTREC_CODEBUFFER_SIZE+BIOS_SIZE+SCRATCH_SIZE, NULL);
 
@@ -2580,6 +2620,15 @@ int lightrec_init_mmap(void)
 	if (!hugetlb && ret != NUM_MEM)
 		log_cb(RETRO_LOG_WARN, "Unable to mmap on any base address, dynarec will be slower numberof mmaps: %d\n",ret);
 
+#ifdef __ORBIS__
+	/* ⚠ RELEASE IT ON FAILURE, HERE. Direct memory is not swap-backed and is not reclaimed
+	 * when a mapping goes away, and this function is called TWICE on the way in - once for
+	 * hugetlb and once without. Leaving the first attempt's pages behind would cost 2 MiB of
+	 * physical memory per load, on a console that answers that with a refusal several loads
+	 * later and no explanation. */
+	if (ret != NUM_MEM)
+		orbis_lr_backing_destroy();
+#endif
 #ifdef HAVE_SHM
 close_return:
 	close(memfd);
@@ -2600,6 +2649,11 @@ void lightrec_free_mmap(void)
 
 	UNMAP(psx_bios, BIOS_SIZE);
 	UNMAP(psx_scratch, SCRATCH_SIZE);
+
+#ifdef __ORBIS__
+	/* Unmapping a view does not return the physical pages behind it. */
+	orbis_lr_backing_destroy();
+#endif
 
 #ifdef HAVE_ASHMEM
 	/* android shared memory is not pinned by mmap, it dies on close */
@@ -2884,6 +2938,17 @@ static void InitCommon(const bool EmulateMemcards, const bool WantPIOMem)
       hugetlb = false;
       psx_mmap = lightrec_init_mmap();
    }
+
+#ifdef __ORBIS__
+   /* The other half of the guard in check_variables. Options are read on the way in, before
+    * anything is mapped, so the answer does not exist yet at that point; it exists now. */
+   if (psx_dynarec != DYNAREC_DISABLED && !orbis_lr_have_code_buffer())
+   {
+      log_cb(RETRO_LOG_WARN, "[PS4] no executable code buffer - the recompiler is off for this "
+                             "session and the interpreter runs instead\n");
+      psx_dynarec = DYNAREC_DISABLED;
+   }
+#endif
 
    if(psx_mmap > 0)
    {
@@ -4202,6 +4267,27 @@ static void check_variables(bool startup)
    }
    else
       psx_dynarec = DYNAREC_DISABLED;
+
+#ifdef __ORBIS__
+   /* ⚠ NO EXECUTABLE PAGES, NO RECOMPILER - AND THIS IS NOT A PREFERENCE.
+    *
+    * Without a code buffer of its own Lightrec lets GNU lightning allocate one, and lightning
+    * asks mmap for PROT_EXEC. This kernel refuses execute at map time; what it grants is
+    * execute added afterwards with sceKernelMprotect, which is what orbis_lr_map_code does and
+    * what the frontend's HANDOFF records being measured. If that promotion was refused, the
+    * recompiler would emit into pages that are not executable and the FIRST BLOCK IT RAN would
+    * take the process down - not return an error, not draw wrongly, end it.
+    *
+    * The interpreter is slower and it runs, so that is what a refusal falls back to. The state
+    * is asked for rather than assumed because this function runs before anything is mapped:
+    * "not tried yet" must not read as "refused". */
+   if (psx_dynarec != DYNAREC_DISABLED && orbis_lr_code_refused())
+   {
+      log_cb(RETRO_LOG_WARN, "[PS4] the recompiler has no executable memory on this run - "
+                             "falling back to the interpreter\n");
+      psx_dynarec = DYNAREC_DISABLED;
+   }
+#endif
 
    var.key = BEETLE_OPT(dynarec_invalidate);
 

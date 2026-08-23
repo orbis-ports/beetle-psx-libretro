@@ -349,12 +349,19 @@ else ifeq ($(platform), orbis)
    HAVE_VULKAN    = 1
    HAVE_OPENGL    = 0
    STATIC_LINKING = 0
-   # ⚠ THE DYNAREC IS OFF, AND NOT BY PREFERENCE. Lightrec mirrors PSX RAM by mapping the
-   # same pages at several addresses, which it does through memfd_create/MAP_SHM -- neither
-   # of which exists here. libretro.c:2345-2574 is where it shows. The interpreter is
-   # slower and it runs; a mirrored-mapping story for this platform is its own piece of
-   # work, and this build is asking whether the GPU path functions at all.
-   HAVE_LIGHTREC  = 0
+   # ⚠ THE DYNAREC IS ON, AND THE WALL IT WAS OFF FOR TURNED OUT NOT TO BE ONE. Lightrec
+   # mirrors PSX RAM by mapping the same pages at several addresses, which libretro.c builds
+   # with memfd_create/MAP_SHM -- neither of which exists here. That is a fact about POSIX
+   # shared memory and says nothing about the platform's own allocator, which separates
+   # physical pages from their mappings more directly than memfd does. Measured on hardware
+   # 2026-08-23: eight simultaneous views of one physical range, coherent both ways.
+   #
+   # ⚠ SWITCHING THIS FLAG NEEDS A CLEAN. It is a -D define and the objects carry no header
+   # dependency on it, so a tree built the other way is silently reused -- which has already
+   # cost one link failure on lightrec_destroy:
+   #
+   #     find . -name '*.o' -delete
+   HAVE_LIGHTREC  = 1
    NEED_CXX_LINKER = 1
 
 # Xbox 360
@@ -710,6 +717,19 @@ endif
 else
    LD = $(CXX)
 endif
+
+# ⚠ COMPILE WITHOUT LINKING, which the PlayStation 4 arm needs and nothing else has.
+#
+# A libretro module on that console is `create-fself --lib` over an ld.lld link against the
+# OpenOrbis toolchain, so $(LD) - which is $(CXX), the host compiler driver - cannot produce
+# it and would pull in the host's libstdc++ trying. STATIC_LINKING is not the escape: it is a
+# -D define about whether the core is built INTO a frontend, and this one is not.
+#
+# So the arm builds objects and ps4/build.sh links them. Before this target existed that was
+# done by running make, letting the link fail, and picking the .o files out of the tree - which
+# is why the .prx that ran on hardware for a day could not be reproduced from this repository.
+.PHONY: objects
+objects: $(OBJECTS)
 
 $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING), 1)

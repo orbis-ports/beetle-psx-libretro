@@ -175,6 +175,12 @@ ifeq ($(HAVE_LIGHTREC), 1)
        INCFLAGS += -isystem$(DEPS_DIR)/mman
    endif
 
+   # PlayStation 4: the mirrored RAM and the code buffer come from the console's own physical
+   # allocator rather than from POSIX shared memory. See ps4/orbis_lightrec_mem.h.
+   ifeq ($(platform), orbis)
+       SOURCES_C += $(CORE_DIR)/ps4/orbis_lightrec_mem.c
+   endif
+
    INCFLAGS += -I$(DEPS_DIR)/lightning/include \
                -I$(DEPS_DIR)/lightrec \
                -I$(CORE_DIR)/include \

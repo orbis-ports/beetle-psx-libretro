@@ -1461,7 +1461,19 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "run_interpreter", "Lightrec Interpreter" },
          { NULL, NULL },
       },
+#ifdef __ORBIS__
+      /* ⚠ THE DEFAULT IS FLIPPED ON THIS CONSOLE, AND THE MEASUREMENT IS WHY. Beetle's
+       * interpreter runs Spyro 3 at about 38% of realtime here: one CPU thread saturated for
+       * the whole frame, the GPU waited on for 0 ms in every five-second window, the graphics
+       * driver at 0.6% of the frame. A core that defaults to the interpreter on this hardware
+       * defaults to unplayable, and the option lives under "hacks" where nobody finds it.
+       *
+       * Falling back is still automatic: if the kernel refuses executable pages this is
+       * clamped to DYNAREC_DISABLED in check_variables, with a line in the log saying so. */
+      "execute"
+#else
       "disabled"
+#endif
    },
    {
       BEETLE_OPT(dynarec_invalidate),
