@@ -127,6 +127,10 @@ manufacturer = "Sony"
 categories = "Emulator"
 authors = "Mednafen Team"
 supported_extensions = "cue|toc|m3u|ccd|exe|pbp|chd"
+# ⚠ WITHOUT THIS LINE THE SCANNER FINDS NOTHING TO ATTACH A PLAYLIST TO. It names the .rdb in
+# RetroArch's database directory that identifies this system's discs; the file is
+# "Sony - PlayStation.rdb" from libretro-database and the name must match it exactly.
+database = "Sony - PlayStation"
 license = "GPLv2"
 permissions = ""
 display_version = "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
