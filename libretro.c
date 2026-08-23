@@ -2236,6 +2236,10 @@ static void SetDiscWrapper(const bool CD_TrayOpen) {
 #define SHM_SIZE     (RAM_SIZE + BIOS_SIZE + SCRATCH_SIZE)
 #define PIO_SIZE     (65536)
 
+#ifdef __ORBIS__
+#include <features/features_cpu.h>
+#include <orbis_env.h>
+#endif
 #ifdef HAVE_LIGHTREC
 #ifdef __ORBIS__
 #include "ps4/orbis_lightrec_mem.h"
@@ -6025,8 +6029,71 @@ static bool retro_set_system_av_info(void)
    return environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &new_av_info);
 }
 
+#ifdef __ORBIS__
+/* ⚠ WHERE THE ONE SATURATED THREAD GOES, because the kernel will not say.
+ *
+ * The driver's BUDGET instrumentation reports the whole process - "1.00 cores busy, and it
+ * waited 0 ms for the GPU" - which established that this port is CPU-bound and could not say by
+ * what. The obvious next step was sceKernelGetCpuUsage, per thread, from the frontend. That
+ * call links and returns 0x8002004e - ENOSYS - so this console does not offer it to this
+ * process, and the split has to come from inside the core.
+ *
+ * ⚠ IT SPLITS TWO THINGS AND NOT THREE. Beetle's PSX is event-driven: the GPU rasteriser, the
+ * SPU, the CD controller and the timers all run from the event scheduler INSIDE CPU_Run. So
+ * "cpu" below is the emulated machine and everything it schedules, and "rest" is what this
+ * function does around it - the hardware renderer's command building, the deinterlacer, the
+ * audio batch. That is enough to answer whether more recompiler work is worth doing; it is not
+ * enough to separate the emulated CPU from the SPU, and saying so here is cheaper than someone
+ * reading "cpu 85%" as a statement about the recompiler.
+ *
+ * ORBIS_CORE_PROFILE=1 in /data/retroarch-env.txt. Off otherwise, and the getenv is
+ * orbis_env_get because a .prx has its own environ - see ps4/orbis_lightrec_mem.h. */
+static void orbis_profile_frame(int64_t t_enter, int64_t t_cpu_in, int64_t t_cpu_out)
+{
+   static int8_t  on = -1;
+   static int64_t window_start, cpu_us, rest_us;
+   static unsigned frames;
+   int64_t t_leave, wall;
+
+   if (on < 0)
+      on = (orbis_env_get("ORBIS_CORE_PROFILE") != NULL
+            && orbis_env_get("ORBIS_CORE_PROFILE")[0] != '0');
+   if (!on)
+      return;
+
+   t_leave = cpu_features_get_time_usec();
+   cpu_us += t_cpu_out - t_cpu_in;
+   rest_us += (t_leave - t_enter) - (t_cpu_out - t_cpu_in);
+   frames++;
+
+   if (!window_start)
+      window_start = t_enter;
+
+   wall = t_leave - window_start;
+   if (wall < 5000000 || !frames)
+      return;
+
+   log_cb(RETRO_LOG_INFO,
+         "[PS4] core profile over %d ms, %u frames: CPU_Run %d us/f (%d.%d%% of wall), "
+         "rest of retro_run %d us/f (%d.%d%%), outside the core %d.%d%%\n",
+         (int)(wall / 1000), frames,
+         (int)(cpu_us / frames),  (int)(cpu_us * 100 / wall),  (int)(cpu_us * 1000 / wall) % 10,
+         (int)(rest_us / frames), (int)(rest_us * 100 / wall), (int)(rest_us * 1000 / wall) % 10,
+         (int)((wall - cpu_us - rest_us) * 100 / wall),
+         (int)((wall - cpu_us - rest_us) * 1000 / wall) % 10);
+
+   window_start = t_leave;
+   cpu_us = rest_us = 0;
+   frames = 0;
+}
+#endif
+
 void retro_run(void)
 {
+#ifdef __ORBIS__
+   const int64_t orbis_t_enter = cpu_features_get_time_usec();
+   int64_t orbis_t_cpu_in = orbis_t_enter, orbis_t_cpu_out = orbis_t_enter;
+#endif
    bool updated = false;
    static int32_t rects[MEDNAFEN_CORE_GEOMETRY_MAX_H];
    EmulateSpecStruct spec = {0};
@@ -6295,7 +6362,13 @@ void retro_run(void)
    GPU_StartFrame(espec);
 
    Running = -1;
+#ifdef __ORBIS__
+   orbis_t_cpu_in = cpu_features_get_time_usec();
+#endif
    timestamp = CPU_Run(PSX_CPU, timestamp);
+#ifdef __ORBIS__
+   orbis_t_cpu_out = cpu_features_get_time_usec();
+#endif
 
    assert(timestamp);
 
@@ -6570,6 +6643,10 @@ void retro_run(void)
    /* LED interface */
    if (led_state_cb)
       retro_led_interface();
+
+#ifdef __ORBIS__
+   orbis_profile_frame(orbis_t_enter, orbis_t_cpu_in, orbis_t_cpu_out);
+#endif
 }
 
 void retro_get_system_info(struct retro_system_info *info)
