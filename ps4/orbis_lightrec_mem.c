@@ -81,22 +81,50 @@ static const char *orbis_lr_err(int32_t rc)
 /* ⚠ MAP_FIXED ON THIS KERNEL REPLACES WHATEVER IS THERE. It has no MAP_FIXED_NOREPLACE, so
  * the Linux arm's "ask for the address and check what came back" does not protect anything -
  * by the time we could check, the frontend's heap would already be gone. Every fixed mapping
- * below therefore asks first.
+ * below therefore asks first, and this is the function that answers.
  *
- * sceKernelVirtualQuery with flags 1 returns the first mapping at or above an address. If
- * that mapping begins after the range we want, the range is empty; if the call fails there is
- * nothing mapped above us at all. Both are a yes. */
+ * ⚠ IT WALKS THE RANGE A GRANULE AT A TIME RATHER THAN ASKING ONE QUESTION, and the reason is
+ * worth keeping. sceKernelVirtualQuery takes a flags word, and the obvious shape for this
+ * check is flags=1 - "give me the first mapping at or above this address" - which answers the
+ * whole range in one call. Nothing in this workshop has ever passed 1. The only value with a
+ * meaning established here is 0, from mesa-ps4's ac_orbis_drm.c, where a nonzero RETURN is
+ * read as "nothing is mapped at this address".
+ *
+ * The failure modes are not symmetric. If a guessed flag makes the call fail, this returns
+ * "free" for every address, MAP_FIXED lands on top of the frontend's heap, and the failure is
+ * a corrupted process rather than a refusal. A guess that is too conservative merely loses the
+ * recompiler. So this uses the semantics that were measured, at the cost of one call per 16
+ * KiB - about eighteen thousand of them across the whole address search, once per content
+ * load, against a recompiler that is worth two and a half times the frame rate.
+ *
+ * If flags=1 is ever established on this platform, this collapses back to a single call. */
 static int orbis_lr_range_free(void *addr, size_t size)
 {
-   OrbisKernelVirtualQueryInfo info;
-   const uintptr_t want_lo = (uintptr_t)addr;
-   const uintptr_t want_hi = want_lo + size;
+   const uintptr_t lo = (uintptr_t)addr;
+   const uintptr_t hi = lo + size;
+   uintptr_t p;
 
-   memset(&info, 0, sizeof(info));
-   if (sceKernelVirtualQuery(addr, 1, &info, sizeof(info)) != 0)
-      return 1;
+   for (p = lo; p < hi; p += ORBIS_GRANULE)
+   {
+      OrbisKernelVirtualQueryInfo info;
+      memset(&info, 0, sizeof(info));
 
-   return (uintptr_t)info.unk01 >= want_hi;
+      if (sceKernelVirtualQuery((const void *)p, 0, &info, sizeof(info)) == 0)
+      {
+         /* Something is there. Say what and where once per rejection: this is the only account
+          * anyone gets of where this process's address space actually is, and the io_base
+          * search is otherwise a silent list of refusals. */
+         log_cb(RETRO_LOG_DEBUG, "[PS4] lightrec: %p is taken (0x%llx-0x%llx, direct %u flexible %u "
+                                 "stack %u pooled %u, '%.31s') - not placing %zu KiB at %p\n",
+                (void *)p, (unsigned long long)(uintptr_t)info.unk01,
+                (unsigned long long)(uintptr_t)info.unk02, info.isDirectMemory,
+                info.isFlexibleMemory, info.isStack, info.isPooledMemory, info.name,
+                size / 1024, addr);
+         return 0;
+      }
+   }
+
+   return 1;
 }
 
 static int orbis_lr_remember(void *addr, size_t size, off_t phys)
