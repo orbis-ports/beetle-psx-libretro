@@ -46,16 +46,33 @@ NAME="mednafen_psx_hw_libretro"
 PRX="$OUT_DIR/$NAME.prx"
 INFO="$OUT_DIR/$NAME.info"
 
-# ⚠ HAVE_LIGHTREC IS A -D DEFINE AND THIS TREE HAS NO HEADER DEPENDENCY ON IT, so a tree built
-# the other way round is silently reused and the link then fails on lightrec_destroy - or
-# worse, does not. Switching it always cleans.
+# ⚠ TWO THINGS THIS TREE'S DEPENDENCY TRACKING CANNOT SEE, and both have already shipped a
+# binary that was not what it claimed to be.
+#
+#   HAVE_LIGHTREC   a -D define, and no object records which way it was built. A tree built the
+#                   other way round is silently reused; the link then fails on lightrec_destroy,
+#                   or worse, does not.
+#
+#   the overlay     orbis-compat comes in on -isystem, and -MMD OMITS SYSTEM HEADERS FROM THE
+#                   .d FILES BY DESIGN. So a change to orbis-compat/include is invisible to
+#                   make: every object stays "up to date" against a header that no longer says
+#                   what it said. Measured 2026-08-23 - sys/sysctl.h was fixed to answer
+#                   hw.ncpu, the core was rebuilt, uploaded and run, and Lightrec still reported
+#                   "Threaded recompiler started with 1 workers" because recompiler.o was
+#                   thirty-three minutes older than the header it was supposed to have read.
+#                   The .prx even came out byte-identical in size, which is what a rebuild that
+#                   rebuilt nothing looks like from the outside.
+#
+# The stamp therefore carries both: the flag, and the newest mtime anywhere under the overlay's
+# include tree.
 STAMP="$ROOT/.ps4-lightrec"
-WANT="$LIGHTREC"
+OVERLAY_STAMP="$(find "$ORBIS_COMPAT_DIR/include" -type f -newermt '@0' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+WANT="$LIGHTREC overlay:${OVERLAY_STAMP:-unknown}"
 if [[ ! -f "$STAMP" || "$(cat "$STAMP")" != "$WANT" ]]; then
   CLEAN=1
 fi
 if [[ $CLEAN -eq 1 ]]; then
-  echo "== cleaning (HAVE_LIGHTREC=$WANT)"
+  echo "== cleaning ($WANT)"
   find "$ROOT" \( -name '*.o' -o -name '*.d' \) -type f -delete
 fi
 echo "$WANT" > "$STAMP"
