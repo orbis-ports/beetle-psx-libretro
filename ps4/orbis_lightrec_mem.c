@@ -266,18 +266,56 @@ void *orbis_lr_map_code(void *addr, size_t size)
       return NULL;
    }
 
-   /* ⚠ A GRANTED PROTECTION IS NOT AN HONOURED ONE - this console has charged for that
-    * distinction three times. The read-back below is not proof that the pages execute; it only
-    * catches a kernel that accepts the call and records nothing. The proof is the probe's rung
-    * 5c, which jumped. */
+   /* ⚠ A GRANTED PROTECTION IS NOT AN HONOURED ONE, AND THE WAY TO TELL IS TO RUN SOMETHING.
+    *
+    * This check used to be sceKernelQueryMemoryProtection: promote to 0x07, read the protection
+    * back, refuse if execute is missing. On hardware that read-back returns 0x03 - the
+    * protection the range was MAPPED with - for a range mprotect has just promoted, at every one
+    * of the sixteen base addresses tried. So the veto fired sixteen times, the recompiler was
+    * clamped off, and the frame rate did not move.
+    *
+    * The pages were executable the whole time. mesa-ps4's probe established it by CALLING a stub
+    * in exactly this arrangement - direct memory, mapped read-write, promoted with
+    * sceKernelMprotect - and it returned 0x00c0ffee (`MIRROR rung 7 OK`, hardware, 2026-08-23).
+    * The probe never asked sceKernelQueryMemoryProtection, so nothing had caught that the query
+    * does not reflect the promotion.
+    *
+    * ⚠ THE LESSON IS NOT "DROP THE CHECK". It is that on this console a query API is not a
+    * measurement of the thing it names, and the workshop has now paid for that four times
+    * (GB_ADDR_CONFIG, the tessellation registers, three readerless env knobs, and this). So the
+    * check stays and becomes the same one the probe made: put six bytes of x86-64 in the buffer
+    * and call them.
+    *
+    *     b8 ee ff c0 00   mov eax, 0x00c0ffee
+    *     c3               ret
+    *
+    * Self-modifying code needs no cache maintenance on x86-64, so a wrong answer here is about
+    * mapping rather than coherency. If the page does not execute this does not return an error,
+    * it ends the process - which is why the line before it goes out on the channel that survives,
+    * and why it is better here, once, at a known point, than on the first recompiled block.
+    *
+    * The stub is written at the START of the buffer and left there. tlsf_create_with_pool
+    * overwrites it moments later when Lightrec takes the buffer over. */
    {
-      void   *lo = NULL, *hi = NULL;
-      int32_t got = 0;
-      if (sceKernelQueryMemoryProtection(at, &lo, &hi, &got) == 0
-            && !(got & ORBIS_KERNEL_PROT_CPU_EXEC))
+      static const uint8_t stub[] = {0xb8, 0xee, 0xff, 0xc0, 0x00, 0xc3};
+      uint32_t (*fn)(void);
+      uint32_t got;
+
+      memcpy(at, stub, sizeof(stub));
+
+      /* RETRO_LOG_ERROR on purpose: on this frontend that is the only level that also reaches
+       * klog, and a datagram queued by a process that is about to die does not leave. */
+      log_cb(RETRO_LOG_ERROR, "[PS4] lightrec: calling %p to see whether it executes. If this is the "
+                              "last lightrec line, the promotion to 0x07 was granted and not "
+                              "honoured, and that is the answer rather than a crash to chase.\n", at);
+
+      memcpy(&fn, &at, sizeof(fn)); /* not a cast: object pointer to function pointer is not one */
+      got = fn();
+
+      if (got != 0x00c0ffeeu)
       {
-         log_cb(RETRO_LOG_ERROR, "[PS4] lightrec: sceKernelMprotect returned 0 for %p but the range "
-                                 "reads back as prot 0x%02x, without execute. Not using it.\n",
+         log_cb(RETRO_LOG_ERROR, "[PS4] lightrec: %p executes but returned 0x%08x instead of "
+                                 "0x00c0ffee. Not trusting it with recompiled code.\n",
                 at, (unsigned)got);
          orbis_lr_code_state = 0;
          orbis_lr_unmap(at, len);
