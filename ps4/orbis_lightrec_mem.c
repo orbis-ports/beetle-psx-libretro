@@ -1,9 +1,13 @@
 /* PlayStation 4 backing store for Lightrec. See orbis_lightrec_mem.h for the shape.
  *
- * ⚠ WHY THIS IS NOT mmap(). The SDK ships musl's headers behind a FreeBSD triple, so the
- * POSIX names here are a thin and occasionally wrong layer over Sony's own calls - MAP_ANON
- * is 0x1002 on this kernel and musl's header says 0x0020. More to the point, none of the
- * POSIX shapes this file needs are reachable through it: there is no shm_open, no
+ * ⚠ WHY THIS IS NOT mmap(). Not because the constants are wrong - they are not. The SDK
+ * ships musl's headers behind a FreeBSD triple, but its <sys/mman.h> ends with
+ * `#include <bits/mman.h>`, which #undefs MAP_ANON and the rest and redefines them to
+ * FreeBSD's values, so MAP_PRIVATE|MAP_ANON compiles to 0x1002 here, which is right.
+ * The reasons are the pool and the shape. Anonymous memory is FLEXIBLE memory - about
+ * 417 MiB for the whole process, shared with everything malloc has grown into - which is
+ * not a budget a code buffer plus its mirrors belongs in. And none of the POSIX shapes
+ * this file needs are reachable through mmap anyway: there is no shm_open, no
  * memfd_create, and mmap has no way to say "the same physical pages again, over there".
  * Sony's allocator does, so this file talks to it directly.
  *
