@@ -29,7 +29,14 @@ done
 TOOLCHAIN="$OO_PS4_TOOLCHAIN"
 
 OUT_DIR="$ROOT"
-JOBS="$(nproc)"
+# ⚠ NOT `nproc`. It is GNU coreutils and macOS does not ship it, so this line exited 127 and
+# took the whole script with it under `set -e`:
+#
+#     ./ps4/build.sh: line 31: nproc: command not found
+#
+# Measured by bundle-gate.sh stage 5, 2026-09-17. getconf is POSIX and answers on both Linux
+# and macOS; nproc and sysctl are kept behind it for the platforms where it does not.
+JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 LIGHTREC=1
 CLEAN=0
 while [[ $# -gt 0 ]]; do
