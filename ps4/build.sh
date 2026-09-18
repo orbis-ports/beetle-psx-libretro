@@ -15,17 +15,37 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
-# The six lines that cannot be shared - see orbis-compat/scripts/ps4/orbis-env.sh. Sibling
+# The six lines that cannot be shared - see orbis-porting-kit/scripts/ps4/orbis-env.sh. Sibling
 # directory first, because that is what a fresh clone of the orbis-ports organisation looks like.
+#
+# ⚠ THE OVERLAY IS FOUND BY A HEADER IT OWNS, NOT BY THIS SCRIPT'S PROLOGUE. Until 2026-09-18
+# both blocks below were one, and it probed for scripts/ps4/orbis-env.sh inside orbis-compat. That
+# file moved to the porting kit that day, so the probe matched nothing, every candidate was rejected
+# and the script exited 1 with "orbis-compat not found" against a checkout that was sitting right
+# there. MEASURED: cores.yml run 35391145504, job `fork`, 26 seconds in.
 for _c in "${ORBIS_COMPAT_DIR:-}" "$ROOT/../orbis-compat" "$HOME/src-ps4/orbis-compat"; do
-  [[ -n "$_c" && -f "$_c/scripts/ps4/orbis-env.sh" ]] && { ORBIS_COMPAT_DIR="$_c"; break; }
+  [[ -n "$_c" && -f "$_c/include/orbis_prefix.h" ]] && { ORBIS_COMPAT_DIR="$_c"; break; }
 done
 [[ -n "${ORBIS_COMPAT_DIR:-}" ]] || {
-  echo "build: orbis-compat not found - clone it next to this repository, or set ORBIS_COMPAT_DIR" >&2
+  echo "build: orbis-compat not found - clone https://github.com/orbis-ports/orbis-compat next to" >&2
+  echo "       this repository, or set ORBIS_COMPAT_DIR" >&2
   exit 1
 }
+
+# ⚠ TWO REPOSITORIES SINCE 2026-09-18: orbis-compat is include/ and the archive, the porting kit
+# is the toolchain file, the loader shim and these scripts. The kit's last candidate is the overlay
+# itself, which carried them until that date - so a pinned checkout older than the move still works.
+for _k in "${ORBIS_KIT_DIR:-}" "$ROOT/../orbis-porting-kit" "$HOME/src-ps4/orbis-porting-kit" "${ORBIS_COMPAT_DIR}"; do
+  [[ -n "$_k" && -f "$_k/scripts/ps4/orbis-env.sh" ]] && { ORBIS_KIT_DIR="$_k"; break; }
+done
+[[ -n "${ORBIS_KIT_DIR:-}" ]] || {
+  echo "build: orbis-porting-kit not found - clone https://github.com/orbis-ports/orbis-porting-kit" >&2
+  echo "       next to this repository, or set ORBIS_KIT_DIR" >&2
+  exit 1
+}
+export ORBIS_COMPAT_DIR ORBIS_KIT_DIR
 # shellcheck source=/dev/null
-. "$ORBIS_COMPAT_DIR/scripts/ps4/orbis-env.sh"
+. "$ORBIS_KIT_DIR/scripts/ps4/orbis-env.sh"
 TOOLCHAIN="$OO_PS4_TOOLCHAIN"
 
 OUT_DIR="$ROOT"
@@ -73,7 +93,13 @@ INFO="$OUT_DIR/$NAME.info"
 # The stamp therefore carries both: the flag, and the newest mtime anywhere under the overlay's
 # include tree.
 STAMP="$ROOT/.ps4-lightrec"
-OVERLAY_STAMP="$(find "$ORBIS_COMPAT_DIR/include" -type f -newermt '@0' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+# ⚠ NOT `find -printf`. It is a GNU extension and BSD find has no such option, so on macOS this
+# line printed a usage error to a discarded stderr and yielded the empty string - the stamp then read
+# "overlay:unknown" on every run, which compares equal to itself and quietly stops noticing that the
+# overlay changed. cksum over the mtimes is POSIX and answers the same question on both hosts.
+OVERLAY_STAMP="$( (cd "$ORBIS_COMPAT_DIR/include" && find . -type f -exec ls -lT {} + 2>/dev/null \
+                   || find . -type f -exec ls -l --time-style=full-iso {} + 2>/dev/null) \
+                 | LC_ALL=C sort | cksum | cut -d' ' -f1)"
 WANT="$LIGHTREC overlay:${OVERLAY_STAMP:-unknown}"
 if [[ ! -f "$STAMP" || "$(cat "$STAMP")" != "$WANT" ]]; then
   CLEAN=1
@@ -117,7 +143,23 @@ fi
 
 # create-fself writes --lib relative to the working directory, and reads OO_PS4_TOOLCHAIN from
 # the environment even when invoked by absolute path out of that very toolchain.
-( cd "$WORK" && OO_PS4_TOOLCHAIN="$TOOLCHAIN" "$TOOLCHAIN/bin/linux/create-fself" \
+# ⚠ HOST FIRST, NOT NAME FIRST. bin/linux/create-fself exists on a Mac too - it is a Linux ELF
+# the kernel cannot run - and `[[ -x ]]` says yes to it, so naming that path outright produced
+# "Exec format error" after a full compile and link, at the most expensive step to fail at. Ordered
+# by the host running this script, the same way RetroArch's ps4/build-core.sh does it.
+case "$(uname -s)" in
+  Darwin) _fself_order=("$TOOLCHAIN/bin/macos/create-fself-macos" "$TOOLCHAIN/bin/macos/create-fself"
+                        "$TOOLCHAIN/bin/linux/create-fself") ;;
+  *)      _fself_order=("$TOOLCHAIN/bin/linux/create-fself" "$TOOLCHAIN/bin/macos/create-fself-macos"
+                        "$TOOLCHAIN/bin/macos/create-fself") ;;
+esac
+_fself=""
+for _c in "${_fself_order[@]}"; do
+  [[ -x "$_c" ]] && { _fself="$_c"; break; }
+done
+[[ -n "$_fself" ]] || { echo "build: no create-fself in $TOOLCHAIN/bin/{linux,macos}" >&2; exit 1; }
+
+( cd "$WORK" && OO_PS4_TOOLCHAIN="$TOOLCHAIN" "$_fself" \
     -in=core.elf -out=core.oelf --lib="$NAME.prx" --paid 0x3800000000000011 >/dev/null )
 
 mkdir -p "$OUT_DIR"
